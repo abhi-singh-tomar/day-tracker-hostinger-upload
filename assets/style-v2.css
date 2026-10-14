@@ -63,6 +63,8 @@ input{background:var(--card);border:1px solid var(--line);border-radius:10px;pad
 .remind input{border:0;background:transparent;padding:5px 4px;font-size:13.5px;color:var(--mut)}
 .remind.on{background:var(--accent-soft)}
 .remind.on input{color:var(--accent);font-weight:700}
+.times{display:flex;gap:8px;flex-wrap:wrap}
+.alert.late{--c:var(--warn)}
 .x{border:0;background:none;padding:0 6px;font-size:18px;color:var(--mut)}
 
 /* tasks */

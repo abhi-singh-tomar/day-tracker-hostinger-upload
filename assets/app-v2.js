@@ -77,6 +77,12 @@ const QUOTES=["Small steps every day add up to big results.","The secret of gett
 const CHEERS=["Nice one! 🎉","Done! 💪","One step closer 🚀","Keep going! ⚡","Great work ✨","Another win 🏆"];
 const pick=a=>a[Math.floor(Math.random()*a.length)];
 const clock=ms=>{const t=Math.max(0,Math.floor(ms/1e3)),H=Math.floor(t/3600),M=Math.floor(t%3600/60),S=t%60,p=n=>String(n).padStart(2,"0");return(H?H+":"+p(M):M)+":"+p(S)};
+/* reminder moments per task: 15 min before start, at start, 15 min before deadline, deadline passed (same as the server) */
+const STAGES=[
+  {k:"start_soon",f:"start_time",off:-15,ico:"⏳",head:"Starting soon",line:(t,m)=>`Starts at ${t} — in ${m} min. Get ready!`},
+  {k:"start",f:"start_time",off:0,ico:"▶️",head:"Time to start",line:t=>`It's ${t}. Let's begin — you've got this!`},
+  {k:"due_soon",f:"due_time",off:-15,ico:"⏰",head:"Deadline soon",line:(t,m)=>`Deadline at ${t} — ${m} min left. Finish strong!`},
+  {k:"late",f:"due_time",off:1,ico:"⚠️",head:"Deadline passed",line:t=>`It was due at ${t}. Please complete it now 💪`}];
 const store={get(k,d){try{const v=JSON.parse(localStorage.getItem(k));return v??d}catch{return d}},set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch{}}};
 
 /* ---- sound: a soft three-note chime made with Web Audio, no file needed ---- */
@@ -87,6 +93,18 @@ function chime(rounds){try{unlock();if(!actx)return;const t0=actx.currentTime+.0
   for(let r=0;r<rounds;r++)[[784,0],[988,.18],[1319,.36]].forEach(([f,dt])=>{const o=actx.createOscillator(),g=actx.createGain(),s=t0+r*1.4+dt;
     o.type="sine";o.frequency.value=f;g.gain.setValueAtTime(0,s);g.gain.linearRampToValueAtTime(.32,s+.02);g.gain.exponentialRampToValueAtTime(.001,s+1.1);
     o.connect(g);g.connect(actx.destination);o.start(s);o.stop(s+1.2)})}catch{}}
+
+/* ---- push: lets the server send reminders even when the app is closed ---- */
+const VAPID_PUBLIC="BJJMBrCfPCVDtQQQk3ob6TTFx_XQfD9VE23UGWzV_F95VHjjbBmEFy0oTLJ-7A0fOm3vDzjHpKNRzPI4YaDh_lE";
+const swReady="serviceWorker"in navigator?navigator.serviceWorker.register("./sw.js").then(()=>navigator.serviceWorker.ready).catch(()=>null):Promise.resolve(null);
+const b64=s=>{const p=(s+"=".repeat((4-s.length%4)%4)).replace(/-/g,"+").replace(/_/g,"/"),r=atob(p);return Uint8Array.from(r,c=>c.charCodeAt(0))};
+async function subscribePush(){ // returns true when this device is registered with the server
+  const reg=await swReady;if(!reg||!reg.pushManager)return!1;
+  let sub=await reg.pushManager.getSubscription();
+  if(!sub)sub=await reg.pushManager.subscribe({userVisibleOnly:!0,applicationServerKey:b64(VAPID_PUBLIC)});
+  const j=sub.toJSON(),tz=Intl.DateTimeFormat().resolvedOptions().timeZone||"Asia/Kolkata";
+  const{error}=await sb.from("push_subscriptions").upsert({endpoint:j.endpoint,p256dh:j.keys.p256dh,auth:j.keys.auth,tz,updated_at:new Date().toISOString()},{onConflict:"endpoint"});
+  if(error)throw error;return!0}
 
 function confetti(n){
   try{if(matchMedia("(prefers-reduced-motion: reduce)").matches)return}catch{}
@@ -112,8 +130,9 @@ function App(){
     [err,setErr]=useState(""),[run,setRun]=useState(()=>store.get("run",null)),[,setTick]=useState(0),[streak,setStreak]=useState(0),
     [toast,setToast]=useState(null),[open,setOpen]=useState(null),[alerts,setAlerts]=useState([]),
     [sound,setSound]=useState(()=>store.get("sound",!0)),[perm,setPerm]=useState(()=>{try{return Notification.permission}catch{return"unsupported"}}),
-    [form,setForm]=useState({title:"",category:"nimcet",due_time:"",task_date:today()});
-  const seq=useRef(0),remRef=useRef([]),soundRef=useRef(sound);soundRef.current=sound;
+    [form,setForm]=useState({title:"",category:"nimcet",start_time:"",due_time:"",task_date:today()});
+  const[push,setPush]=useState("off");
+  const seq=useRef(0),remRef=useRef([]),soundRef=useRef(sound),pushRef=useRef(!1);soundRef.current=sound;
   const T0=today(),isToday=date===T0,isFuture=date>T0;
 
   async function load(){
@@ -123,9 +142,10 @@ function App(){
     if(my!==seq.current)return;
     T.error?setErr(T.error.message):(setErr(""),setTasks(T.data));setLogs(L.data||[]);
     loadReminders();loadStreak()}
-  async function loadReminders(){const t0=today();
-    const{data}=await sb.from("tasks").select("id,title,category,task_date,due_time,done").eq("done",!1).not("due_time","is",null).gte("task_date",addDays(t0,-1)).lte("task_date",addDays(t0,1));
-    data&&(remRef.current=data,checkReminders())}
+  async function loadReminders(){const t0=today(),q=()=>sb.from("tasks").select("*").eq("done",!1).gte("task_date",addDays(t0,-1)).lte("task_date",addDays(t0,1));
+    let r=await q().or("due_time.not.is.null,start_time.not.is.null");
+    if(r.error)r=await q().not("due_time","is",null); // database not updated yet (no start_time column)
+    r.data&&(remRef.current=r.data,checkReminders())}
   async function loadStreak(){const t0=today();
     const{data}=await sb.from("tasks").select("completed_at").eq("done",!0).gte("completed_at",new Date(Date.now()-120*864e5).toISOString());
     const days=new Set((data||[]).filter(x=>x.completed_at).map(x=>ymd(new Date(x.completed_at))));
@@ -133,29 +153,46 @@ function App(){
 
   /* ---- reminders ---- */
   function checkReminders(){const now=Date.now(),fired=store.get("fired",{}),snooze=store.get("snooze",{});let changed=!1;
-    remRef.current.forEach(t=>{if(t.done||!t.due_time)return;
-      const key=t.id+"|"+t.task_date+"|"+t.due_time.slice(0,5),due=new Date(t.task_date+"T"+t.due_time.slice(0,5)).getTime();
-      if(snooze[t.id]){if(now>=snooze[t.id]){delete snooze[t.id];changed=!0;ring(t)}return}
-      if(!fired[key]&&now>=due&&now-due<30*6e4){fired[key]=now;changed=!0;ring(t)}});
+    remRef.current.forEach(t=>{if(t.done)return;
+      const sz=snooze[t.id];
+      if(sz&&typeof sz==="object"){if(now>=sz.u){delete snooze[t.id];changed=!0;const st=STAGES.find(s=>s.k===sz.s);st&&t[st.f]&&ring(t,st)}return}
+      STAGES.forEach(st=>{const v=t[st.f];if(!v)return;
+        const at=new Date(t.task_date+"T"+v.slice(0,5)).getTime(),fire=at+st.off*6e4,key=t.id+"|"+st.k+"|"+t.task_date+"|"+v.slice(0,5);
+        if(!fired[key]&&now>=fire&&now-fire<20*6e4){fired[key]=now;changed=!0;ring(t,st)}})});
     if(changed){Object.keys(fired).forEach(k=>now-fired[k]>3*864e5&&delete fired[k]);store.set("fired",fired);store.set("snooze",snooze)}}
-  function ring(t){
+  function ring(t,st){
+    const at=t[st.f].slice(0,5),mins=Math.max(1,Math.round((new Date(t.task_date+"T"+at).getTime()-Date.now())/6e4)),a={id:t.id+"|"+st.k,t,st,at,line:st.line(at,mins)};
     soundRef.current&&chime(3);
-    try{if(Notification.permission==="granted"){const n=new Notification("🔔 "+t.title,{body:"Reminder · "+t.due_time.slice(0,5)+" — you've got this!",tag:"rem-"+t.id,requireInteraction:!0});n.onclick=()=>{window.focus();n.close()}}}catch{}
-    setAlerts(a=>a.some(x=>x.id===t.id)?a:[...a,t])}
-  function closeAlert(t){setAlerts(a=>a.filter(x=>x.id!==t.id))}
-  function snoozeAlert(t,min){const s=store.get("snooze",{});s[t.id]=Date.now()+min*6e4;store.set("snooze",s);closeAlert(t);say(`Snoozed ${min} min 😴`)}
-  async function enableReminders(){unlock();
-    try{const p=await Notification.requestPermission();setPerm(p);p==="granted"?say("Reminders on 🔔"):say("Notifications blocked — sound alerts still work")}catch{say("This browser can't show notifications")}
-    soundRef.current&&chime(1)}
+    try{if(!pushRef.current&&Notification.permission==="granted"){/* with push on, the server sends the notification */
+      const n=new Notification(st.ico+" "+st.head+": "+t.title,{body:a.line,tag:"rem-"+t.id,requireInteraction:!0});n.onclick=()=>{window.focus();n.close()}}}catch{}
+    setAlerts(l=>[...l.filter(x=>x.t.id!==t.id),a])}
+  function closeAlert(a){setAlerts(l=>l.filter(x=>x.id!==a.id))}
+  function snoozeAlert(a,min){const s=store.get("snooze",{});s[a.t.id]={u:Date.now()+min*6e4,s:a.st.k};store.set("snooze",s);closeAlert(a);say(`Snoozed ${min} min 😴`)}
+  async function connectPush(quiet){
+    try{const ok=await subscribePush();setPush(ok?"on":"unsupported");pushRef.current=ok;
+      !quiet&&say(ok?"Reminders on — even when the app is closed 🔔":"This browser can't get reminders while closed")}
+    catch(e){setPush("error");pushRef.current=!1;!quiet&&say("Couldn't connect reminders: "+(e.message||e))}}
+  async function enableReminders(){unlock();soundRef.current&&chime(1);
+    try{const p=await Notification.requestPermission();setPerm(p);
+      p==="granted"?await connectPush(!1):say("Notifications are blocked — allow them in your browser/site settings")}
+    catch{say("This browser can't show notifications")}}
+  async function testPush(){say("Sending a test… 📨");
+    const{data,error}=await sb.functions.invoke("send-reminders",{body:{test:!0}});
+    error?say("Test failed — is the server part set up? ("+error.message+")"):say(data&&data.sent?"Test sent! Check your notifications 🔔":"No device registered yet — tap Turn on reminders")}
 
   useEffect(()=>{load();setForm(f=>({...f,task_date:date>today()?date:today()}));setOpen(null)},[date]);
+  useEffect(()=>{perm==="granted"&&connectPush(!0)},[]);
   useEffect(()=>{const id=setInterval(()=>{checkReminders();Date.now()%(5*6e4)<15e3&&loadReminders()},15e3);return()=>clearInterval(id)},[]);
   useEffect(()=>{if(!run)return;const id=setInterval(()=>setTick(t=>t+1),1e3);return()=>clearInterval(id)},[run]);
   useEffect(()=>{if(!toast)return;const id=setTimeout(()=>setToast(null),2400);return()=>clearTimeout(id)},[toast]);
 
   const say=msg=>setToast({msg,id:Date.now()});
   const overdue=x=>!x.done&&x.due_time&&(x.task_date<T0||x.task_date===T0&&x.due_time.slice(0,5)<nowHM());
-  const rank=x=>(overdue(x)?-200:0)+{high:0,medium:10,low:20}[x.priority||"medium"]+(x.due_time?parseInt(x.due_time.slice(0,5).replace(":",""))/1e4-100:.5);
+  const firstTime=x=>x.start_time||x.due_time;
+  const rank=x=>(overdue(x)?-200:0)+{high:0,medium:10,low:20}[x.priority||"medium"]+(firstTime(x)?parseInt(firstTime(x).slice(0,5).replace(":",""))/1e4-100:.5);
+  const timeText=x=>{const s=x.start_time&&x.start_time.slice(0,5),d=x.due_time&&x.due_time.slice(0,5);
+    return s&&d?"🕑 "+s+" → "+d:s?"▶ starts "+s:d?"⏰ by "+d:""};
+  const dbHint=e=>/start_time/.test(e.message||"")?"Start times need the database update — run supabase/setup.sql in Supabase first.":e.message;
   const runMin=()=>run?(Date.now()-run.start)/6e4:0;
   const taskMin=id=>logs.filter(l=>l.task_id===id).reduce((a,l)=>a+Number(l.minutes),0)+(run&&run.id===id?runMin():0);
 
@@ -165,11 +202,15 @@ function App(){
     if(!same){const r={id:x.id,cat:x.category,title:x.title,start:Date.now()};store.set("run",r);setRun(r);say("Focus timer started 🎧")}
     else say("Time saved ⏱️");setOpen(null);load()}
   async function add(ev){ev.preventDefault();const title=form.title.trim();if(!title)return;
-    const td=form.task_date||date;
-    const{error}=await sb.from("tasks").insert({title,category:form.category,type:form.due_time?"deadline":"flexible",due_time:form.due_time||null,priority:"medium",task_date:td});
-    if(error)return setErr(error.message);
-    setErr("");setForm({...form,title:"",due_time:""});
-    say(td===date?(form.due_time?"Added — I'll remind you at "+form.due_time+" 🔔":"Added ✨"):"Planned for "+short(td)+" 📅");load()}
+    const td=form.task_date||date,st=form.start_time,dt=form.due_time;
+    if(st&&dt&&dt<=st)return setErr("The deadline should be after the start time.");
+    const row={title,category:form.category,type:dt?"deadline":"flexible",due_time:dt||null,priority:"medium",task_date:td};
+    if(st)row.start_time=st;
+    const{error}=await sb.from("tasks").insert(row);
+    if(error)return setErr(dbHint(error));
+    setErr("");setForm({...form,title:"",start_time:"",due_time:""});
+    say(td!==date?"Planned for "+short(td)+" 📅":st||dt?"Added — I'll remind you "+(st?"before it starts":"")+(st&&dt?" and ":"")+(dt?"before the deadline":"")+" 🔔":"Added ✨");
+    (st||dt)&&perm==="default"&&enableReminders();load()}
   async function toggle(x){
     run&&run.id===x.id&&!x.done&&await stopRun();
     await sb.from("tasks").update({done:!x.done,completed_at:x.done?null:new Date().toISOString()}).eq("id",x.id);
@@ -179,17 +220,20 @@ function App(){
   async function remove(x){run&&run.id===x.id&&(localStorage.removeItem("run"),setRun(null));
     await sb.from("tasks").delete().eq("id",x.id);setOpen(null);load()}
   async function moveTo(x,to){await sb.from("tasks").update({task_date:to}).eq("id",x.id);setOpen(null);say("Moved to "+short(to)+" ➡️");load()}
-  async function remind(x,when){ // when: Date (quick options) or "HH:MM" string or null to clear
-    let upd;
-    if(when===null)upd={due_time:null,type:"flexible"};
-    else if(when instanceof Date)upd={due_time:hm(when),task_date:ymd(when),type:"deadline"};
-    else upd={due_time:when,task_date:x.task_date<today()?today():x.task_date,type:"deadline"};
-    await sb.from("tasks").update(upd).eq("id",x.id);
-    if(upd.due_time){const s=store.get("snooze",{});delete s[x.id];store.set("snooze",s);
-      say("I'll remind you at "+upd.due_time+(upd.task_date!==today()?" on "+short(upd.task_date):"")+" 🔔");perm==="default"&&enableReminders()}
-    else say("Reminder removed");
-    setOpen(null);load()}
-  async function alertDone(t){closeAlert(t);await sb.from("tasks").update({done:!0,completed_at:new Date().toISOString()}).eq("id",t.id);confetti(25);say(pick(CHEERS));load()}
+  async function setTime(x,field,v){ // field: start_time | due_time, v: "HH:MM" or "" to clear
+    if((x[field]||"").slice(0,5)===v)return;
+    const other=field==="start_time"?x.due_time:x.start_time,o=other&&other.slice(0,5);
+    if(v&&o&&(field==="start_time"?v>=o:v<=o))return say("The deadline should be after the start time");
+    const upd={[field]:v||null};
+    if(field==="due_time")upd.type=v?"deadline":"flexible";
+    if(v&&x.task_date<today())upd.task_date=today();
+    const{error}=await sb.from("tasks").update(upd).eq("id",x.id);
+    if(error)return setErr(dbHint(error));
+    const s=store.get("snooze",{});delete s[x.id];store.set("snooze",s);
+    say(!v?"Time removed":field==="start_time"?"Start set to "+v+" ▶":"Deadline set to "+v+" ⏰");
+    v&&perm==="default"&&enableReminders();load()}
+  async function alertDone(a){closeAlert(a);await sb.from("tasks").update({done:!0,completed_at:new Date().toISOString()}).eq("id",a.t.id);confetti(25);say(pick(CHEERS));load()}
+  async function alertStart(a){closeAlert(a);run&&run.id===a.t.id?say("Already focusing 🎧"):await toggleRun(a.t)}
 
   const day=tasks.filter(x=>x.task_date===date),allN=day.length,allD=day.filter(x=>x.done).length;
   const stat=c=>{const a=day.filter(x=>x.category===c);return[a.filter(x=>x.done).length,a.length]};
@@ -230,15 +274,16 @@ function App(){
           h("button",{type:"button",className:dateChoice==="tomorrow"?"on":"",onClick:()=>setForm({...form,task_date:addDays(T0,1)})},"Tomorrow"),
           h("label",{className:"pickdate"+(dateChoice==="pick"?" on":""),title:"Pick a date"},dateChoice==="pick"?short(form.task_date):"📅 Date",
             h("input",{type:"date",value:form.task_date,onChange:e=>e.target.value&&setForm({...form,task_date:e.target.value}),"aria-label":"Task date"}))),
-        h("label",{className:"remind"+(form.due_time?" on":""),title:"Remind me at"},form.due_time?"🔔":"🔔 Remind",
-          h("input",{type:"time",value:form.due_time,onChange:e=>setForm({...form,due_time:e.target.value}),"aria-label":"Remind me at"}),
-          form.due_time&&h("button",{type:"button",className:"x",onClick:()=>setForm({...form,due_time:""}),"aria-label":"Clear reminder"},"×")))),
+        h("div",{className:"times"},[["start_time","▶ Start","Start time"],["due_time","⏰ Deadline","Deadline"]].map(([f,l,al])=>
+          h("label",{key:f,className:"remind"+(form[f]?" on":""),title:al},l,
+            h("input",{type:"time",value:form[f],onChange:e=>setForm({...form,[f]:e.target.value}),"aria-label":al}),
+            form[f]&&h("button",{type:"button",className:"x",onClick:()=>setForm({...form,[f]:""}),"aria-label":"Clear "+al.toLowerCase()},"×")))))),
     err&&h("p",{className:"warn"},err),
 
     filter!=="all"&&h("p",{className:"filtered"},"Showing "+CATS[filter].label+" only · ",h("button",{className:"link",onClick:()=>setFilter("all")},"show all")),
 
     h("ul",{className:"list"},list.map(x=>{const on=run&&run.id===x.id,mins=Math.round(taskMin(x.id)),od=overdue(x),carried=x.task_date<date,isOpen=open===x.id;
-      const meta=[CATS[x.category].icon+" "+CATS[x.category].label,x.due_time&&"🔔 "+x.due_time.slice(0,5),mins>0&&"⏱ "+mins+" min",carried&&"from "+short(x.task_date)].filter(Boolean);
+      const meta=[CATS[x.category].icon+" "+CATS[x.category].label,timeText(x),mins>0&&"⏱ "+mins+" min",carried&&"from "+short(x.task_date)].filter(Boolean);
       return h("li",{key:x.id,className:`task ${x.category}${x.done?" done":""}${on?" running":""}${isOpen?" open":""}`},
         h("div",{className:"task-row"},
           h("button",{className:"check",onClick:()=>toggle(x),"aria-label":x.done?"Mark not done":"Mark done","aria-pressed":x.done},x.done?"✓":""),
@@ -247,12 +292,9 @@ function App(){
             h("div",{className:"meta"},meta.join("  ·  "),od&&h("span",{className:"od"},"  ·  Overdue"),on&&h("span",{className:"live"},"  ·  ● "+clock(Date.now()-run.start)))),
           h("button",{className:"more",onClick:()=>setOpen(isOpen?null:x.id),"aria-label":"Task options","aria-expanded":isOpen},"⋯")),
         isOpen&&h("div",{className:"menu"},
-          !x.done&&h("div",{className:"menu-row"},
-            h("span",{className:"menu-l"},"🔔 Remind me"),
-            h("button",{onClick:()=>remind(x,new Date(Date.now()+15*6e4))},"in 15 min"),
-            h("button",{onClick:()=>remind(x,new Date(Date.now()+60*6e4))},"in 1 hour"),
-            h("label",{className:"at"},"at ",h("input",{type:"time",defaultValue:x.due_time?x.due_time.slice(0,5):"",onBlur:e=>e.target.value&&e.target.value!==(x.due_time||"").slice(0,5)&&remind(x,e.target.value),onKeyDown:e=>e.key==="Enter"&&e.target.blur(),"aria-label":"Remind at time"})),
-            x.due_time&&h("button",{onClick:()=>remind(x,null)},"Clear")),
+          !x.done&&h("div",{className:"menu-row"},[["start_time","▶ Start","Start time"],["due_time","⏰ Deadline","Deadline"]].map(([f,l,al])=>{const v=x[f]?x[f].slice(0,5):"";
+            return h("label",{key:f+v,className:"at"},l,h("input",{type:"time",defaultValue:v,onBlur:e=>setTime(x,f,e.target.value),onKeyDown:e=>e.key==="Enter"&&e.target.blur(),"aria-label":al}))})),
+          !x.done&&h("p",{className:"m small"},"You'll be reminded 15 min before the start, at the start, 15 min before the deadline, and when it passes."),
           h("div",{className:"menu-row"},
             !x.done&&h("button",{className:on?"on":"",onClick:()=>toggleRun(x)},on?"⏹ Stop timer":"▶ Focus timer"),
             !x.done&&h("button",{onClick:()=>moveTo(x,addDays(date<T0?T0:date,1))},"↪ Move to next day"),
@@ -263,19 +305,20 @@ function App(){
 
     h("p",{className:"quote"},"“"+quote+"”"),
     h("footer",{className:"foot"},
-      perm==="granted"?h("span",{className:"ok"},"🔔 Reminders on"):perm==="unsupported"?null:h("button",{onClick:enableReminders},"🔔 Turn on reminders"),
+      perm==="unsupported"?null:perm==="granted"&&push==="on"?h("span",{className:"ok"},"🔔 Reminders on"):h("button",{onClick:enableReminders},push==="error"?"⚠️ Retry reminders":"🔔 Turn on reminders"),
+      push==="on"&&h("button",{onClick:testPush},"Send test notification"),
       h("button",{onClick:()=>{const v=!sound;setSound(v);store.set("sound",v);v&&chime(1)},"aria-pressed":sound},sound?"🔊 Sound on":"🔇 Sound off"),
       h("button",{onClick:()=>{unlock();chime(1)}},"Test sound"),
       h("button",{onClick:()=>sb.auth.signOut()},"Log out")),
 
     alerts[0]&&h("div",{className:"alert-wrap",role:"alertdialog","aria-label":"Reminder"},
-      h("div",{className:"alert "+alerts[0].category},
-        h("div",{className:"bell"},"🔔"),
-        h("p",{className:"m"},"Reminder · "+alerts[0].due_time.slice(0,5)),
-        h("h2",null,alerts[0].title),
-        h("p",{className:"m"},"You've got this — let's do it now!"),
+      h("div",{className:"alert "+alerts[0].t.category+(alerts[0].st.k==="late"?" late":"")},
+        h("div",{className:"bell"},alerts[0].st.ico),
+        h("p",{className:"m"},alerts[0].st.head+" · "+alerts[0].at),
+        h("h2",null,alerts[0].t.title),
+        h("p",{className:"m"},alerts[0].line),
         h("div",{className:"alert-act"},
-          h("button",{className:"primary",onClick:()=>alertDone(alerts[0])},"✓ Mark done"),
+          /^start/.test(alerts[0].st.k)?h("button",{className:"primary",onClick:()=>alertStart(alerts[0])},"▶ Start focus timer"):h("button",{className:"primary",onClick:()=>alertDone(alerts[0])},"✓ Mark done"),
           h("button",{onClick:()=>snoozeAlert(alerts[0],10)},"Snooze 10 min"),
           h("button",{onClick:()=>closeAlert(alerts[0])},"Dismiss")),
         alerts.length>1&&h("p",{className:"m small"},"+"+(alerts.length-1)+" more"))),
