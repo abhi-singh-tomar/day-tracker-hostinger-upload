@@ -1,0 +1,29 @@
+# Always serve the latest version of the app after a normal refresh.
+# "no-cache" = the browser may keep a copy, but must ask the server if it changed (fast 304 if not).
+
+<IfModule mod_headers.c>
+  <FilesMatch "\.(html|js|css|webmanifest|json)$">
+    Header set Cache-Control "no-cache, must-revalidate"
+    Header unset Expires
+  </FilesMatch>
+  # The service worker must never be cached, so app updates are picked up right away
+  <Files "sw.js">
+    Header set Cache-Control "no-cache, no-store, must-revalidate"
+    Header set Service-Worker-Allowed "/"
+  </Files>
+  # Icons rarely change: cache for a week
+  <FilesMatch "\.(png|svg|ico)$">
+    Header set Cache-Control "public, max-age=604800"
+  </FilesMatch>
+</IfModule>
+
+<IfModule mod_expires.c>
+  ExpiresActive Off
+</IfModule>
+
+# Stop Hostinger's LiteSpeed server cache from serving old pages
+<IfModule LiteSpeed>
+  CacheDisable public /
+</IfModule>
+
+AddType application/manifest+json .webmanifest

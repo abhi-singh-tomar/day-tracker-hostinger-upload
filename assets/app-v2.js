@@ -171,7 +171,8 @@ function App(){
   async function connectPush(quiet){
     try{const ok=await subscribePush();setPush(ok?"on":"unsupported");pushRef.current=ok;
       !quiet&&say(ok?"Reminders on — even when the app is closed 🔔":"This browser can't get reminders while closed")}
-    catch(e){setPush("error");pushRef.current=!1;!quiet&&say("Couldn't connect reminders: "+(e.message||e))}}
+    catch(e){setPush("error");pushRef.current=!1;const m=e.message||String(e);
+      !quiet&&say(/push_subscriptions|schema cache/.test(m)?"Reminder server isn't set up yet — run supabase/setup.sql in Supabase":"Couldn't connect reminders: "+m)}}
   async function enableReminders(){unlock();soundRef.current&&chime(1);
     try{const p=await Notification.requestPermission();setPerm(p);
       p==="granted"?await connectPush(!1):say("Notifications are blocked — allow them in your browser/site settings")}
